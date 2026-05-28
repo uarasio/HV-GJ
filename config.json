@@ -1,21 +1,54 @@
 {
   "name": "PMVHaven",
-  "description": "PMVHaven plugin",
-  "author": "",
-  "authorUrl": "",
+  "description": "PMVHaven plugin for Grayjay - channels, search, comments, recommendations, login, history & migration",
+  "author": "uarasio",
+  "authorUrl": "https://github.com/uarasio",
+  "platformUrl": "https://pmvhaven.com",
 
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/HV-GJ/refs/heads/main/config.json",
   "repositoryUrl": "https://github.com/uarasio/HV-GJ",
   "scriptUrl": "./script.js",
-  "version": 12,
+  "version": 21,
 
   "iconUrl": "./logo.png",
   "id": "03fb92a4-f857-4f45-a7bf-00c1660e75cb",
 
   "scriptSignature": "",
   "scriptPublicKey": "",
-  "packages": ["Http", "DOMParser"],
+  "packages": ["Http", "DOMParser", "Utilities"],
 
   "allowEval": false,
-  "allowUrls": ["everywhere"]
+  "allowUrls": [
+    "pmvhaven.com",
+    ".pmvhaven.com",
+    "video.pmvhaven.com",
+    "storage.pmvhaven.com",
+    ".cloudflarestorage.com"
+  ],
+  "allowAllHttpHeaderAccess": false,
+
+  "authentication": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "loginUrl": "https://pmvhaven.com/login",
+    "completionUrl": "https://pmvhaven.com/",
+    "domainHeadersToFind": {
+      "pmvhaven.com": ["Cookie"]
+    },
+    "cookiesToFind": ["better-auth.session_token"],
+    "cookiesExclOthers": false
+  },
+
+  "settings": [
+    {
+      "variable": "syncRemoteHistory",
+      "name": "Sync Remote History",
+      "description": "When enabled, your PMVHaven watch history will be imported into Grayjay (requires login).",
+      "type": "Boolean",
+      "default": "false"
+    }
+  ],
+
+  "supportedClaimTypes": [3],
+  "primaryClaimFieldType": 3,
+  "subscriptionRateLimit": 60
 }
