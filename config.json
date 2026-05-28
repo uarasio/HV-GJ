@@ -1,0 +1,21 @@
+{
+  "name": "PMVHaven",
+  "description": "PMVHaven plugin",
+  "author": "",
+  "authorUrl": "",
+
+  "sourceUrl": "https://raw.githubusercontent.com/sylm54/pmvhaven/refs/heads/main/config.json",
+  "repositoryUrl": "https://github.com/sylm54/pmvhaven",
+  "scriptUrl": "./script.js",
+  "version": 12,
+
+  "iconUrl": "./logo.png",
+  "id": "03fb92a4-f857-4f45-a7bf-00c1660e75cb",
+
+  "scriptSignature": "",
+  "scriptPublicKey": "",
+  "packages": ["Http", "DOMParser"],
+
+  "allowEval": false,
+  "allowUrls": ["everywhere"]
+}
