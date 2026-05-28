@@ -220,7 +220,14 @@ source.enable = function(conf, settings, savedState) {
             state.isAuthenticated = !!s.isAuthenticated;
         } catch (e) { /* ignore */ }
     }
-    log("PMVHaven plugin enabled. syncRemoteHistory=" + pluginSettings.syncRemoteHistory);
+    // If Grayjay tells us the user is logged in (via its built-in bridge), trust it.
+    try {
+        if (typeof bridge !== "undefined" && bridge && typeof bridge.isLoggedIn === "function" && bridge.isLoggedIn()) {
+            state.isAuthenticated = true;
+        }
+    } catch (e) { /* ignore */ }
+    log("PMVHaven plugin enabled. syncRemoteHistory=" + pluginSettings.syncRemoteHistory +
+        " auth=" + state.isAuthenticated);
 };
 
 source.disable = function() {
@@ -255,21 +262,51 @@ source.getCapabilities = function() {
 
 // ---------- auth ----------
 
-source.isLoggedIn = function() {
+function fetchUserInfo() {
+    // Pull username/userId from /api/auth/get-session using current cookies.
     try {
-        // Hit session endpoint with stored cookies (useAuth=true)
         const res = http.GET(BASE_URL + "/api/auth/get-session", API_HEADERS, true);
-        if (!res.isOk) return false;
+        if (!res || !res.isOk) return false;
         const body = (res.body || "").trim();
         if (!body || body === "null") return false;
         const json = JSON.parse(body);
-        const user = json.user || (json.session && json.session.user);
-        if (user && (user.id || user.userId)) {
-            state.userId = user.id || user.userId;
-            state.username = user.username || user.name || state.username;
+        const user = json.user || (json.session && json.session.user) || json.data;
+        if (user && (user.id || user._id || user.userId)) {
+            state.userId = user.id || user._id || user.userId;
+            state.username = user.username || user.name || state.username || "";
+            return true;
+        }
+    } catch (e) {
+        log("fetchUserInfo error: " + e);
+    }
+    return false;
+}
+
+function bridgeIsLoggedIn() {
+    try {
+        if (typeof bridge !== "undefined" && bridge && typeof bridge.isLoggedIn === "function") {
+            return !!bridge.isLoggedIn();
+        }
+    } catch (e) { /* ignore */ }
+    return false;
+}
+
+source.isLoggedIn = function() {
+    try {
+        // 1) Trust Grayjay's bridge signal first — once it has captured the
+        //    required cookies via its login web view, this is the authoritative
+        //    indicator that the user finished the flow.
+        if (bridgeIsLoggedIn()) {
+            state.isAuthenticated = true;
+            if (!state.username) fetchUserInfo();
+            return true;
+        }
+        // 2) Fallback: ask the server with our stored cookies.
+        if (fetchUserInfo()) {
             state.isAuthenticated = true;
             return true;
         }
+        state.isAuthenticated = false;
         return false;
     } catch (e) {
         log("isLoggedIn error: " + e);
@@ -279,17 +316,30 @@ source.isLoggedIn = function() {
 
 source.getLoggedInUser = function() {
     try {
-        if (state.username && state.isAuthenticated) return state.username;
-        if (source.isLoggedIn()) return state.username || "Logged In";
-        return null;
+        if (!source.isLoggedIn()) return null;
+        if (!state.username) fetchUserInfo();
+        return state.username || "Logged In";
     } catch (e) { return null; }
 };
 
+// IMPORTANT: Grayjay shows "Login cancelled" whenever this returns false (or
+// throws). SB-GJ never returns false here — it trusts that Grayjay's web view
+// captured the cookies and returns true unconditionally. We do the same:
+// the actual session check is deferred to isLoggedIn()/getLoggedInUser() so
+// the user can re-validate later from settings without aborting the flow.
 source.login = function() {
     try {
-        source.isLoggedIn();
-        return state.isAuthenticated;
-    } catch (e) { return false; }
+        state.isAuthenticated = true;
+        // Best-effort: try to populate the username right away.
+        try { fetchUserInfo(); } catch (e) { /* ignore */ }
+        log("login(): accepted - cookies captured by Grayjay");
+        return true;
+    } catch (e) {
+        log("login error: " + e);
+        // Still return true so Grayjay does not display "Login cancelled".
+        // isLoggedIn() will resolve the real state on the next call.
+        return true;
+    }
 };
 
 source.logout = function() {
@@ -298,7 +348,7 @@ source.logout = function() {
     state.userId = "";
     try {
         if (typeof http.clearCookies === "function") http.clearCookies("pmvhaven.com");
-        if (typeof bridge !== "undefined" && bridge.clearCookies) bridge.clearCookies("pmvhaven.com");
+        if (typeof bridge !== "undefined" && bridge && bridge.clearCookies) bridge.clearCookies("pmvhaven.com");
     } catch (e) { /* ignore */ }
 };
 
@@ -313,25 +363,20 @@ source.getHome = function() {
 source.searchSuggestions = function(query) { return []; };
 
 // Search filter constants (must match values used in search())
-const SORT_OPTIONS = [
-    "Relevance", "Newest", "Oldest", "Most Popular", "Most Liked"
-];
+const SORT_OPTIONS = ["Relevance", "Newest", "Oldest", "Most Popular", "Most Liked"];
 const SORT_MAP = {
-    "Relevance": "",
-    "Newest": "-uploadDate",
-    "Oldest": "uploadDate",
-    "Most Popular": "-bayesianRating",
-    "Most Liked": "-likes"
+    "Relevance":     "",
+    "Newest":        "-uploadDate",
+    "Oldest":        "uploadDate",
+    "Most Popular":  "-bayesianRating",
+    "Most Liked":    "-likes"
 };
-const DATE_OPTIONS = ["Any Time", "Today", "Last 7 Days", "Last 30 Days", "Last Year"];
-const DATE_DAYS = { "Today": 1, "Last 7 Days": 7, "Last 30 Days": 30, "Last Year": 365 };
-const DURATION_OPTIONS = ["Any", "0-5 min", "5-20 min", "20+ min"];
+const DATE_DAYS = { "today": 1, "7days": 7, "30days": 30, "365days": 365 };
 const DURATION_MAP = {
-    "0-5 min": { durationMax: 5 * 60 },
-    "5-20 min": { durationMin: 5 * 60, durationMax: 20 * 60 },
-    "20+ min": { durationMin: 20 * 60 }
+    "0-5":   { durationMax: 5 * 60 },
+    "5-20":  { durationMin: 5 * 60, durationMax: 20 * 60 },
+    "20+":   { durationMin: 20 * 60 }
 };
-const QUALITY_OPTIONS = ["Any", "4K", "QHD", "FHD", "HD", "SD"];
 const QUALITY_MAP = {
     "4K":  { minHeight: 2160 },
     "QHD": { minHeight: 1440, maxHeight: 2159 },
@@ -345,35 +390,68 @@ source.getSearchCapabilities = function() {
         types: [Type.Feed.Mixed, Type.Feed.Videos, Type.Feed.Channels, Type.Feed.Playlists],
         sorts: SORT_OPTIONS,
         filters: [
-            { name: "Date",     type: "dropdown", filters: DATE_OPTIONS.map(v => ({ name: v, value: v })) },
-            { name: "Duration", type: "dropdown", filters: DURATION_OPTIONS.map(v => ({ name: v, value: v })) },
-            { name: "Quality",  type: "dropdown", filters: QUALITY_OPTIONS.map(v => ({ name: v, value: v })) }
+            {
+                id: "date",
+                name: "Date",
+                isMultiSelect: false,
+                filters: [
+                    { name: "Any time",     value: "" },
+                    { name: "Today",        value: "today" },
+                    { name: "Last 7 days",  value: "7days" },
+                    { name: "Last 30 days", value: "30days" },
+                    { name: "Last year",    value: "365days" }
+                ]
+            },
+            {
+                id: "duration",
+                name: "Duration",
+                isMultiSelect: false,
+                filters: [
+                    { name: "Any",       value: "" },
+                    { name: "0-5 min",   value: "0-5" },
+                    { name: "5-20 min",  value: "5-20" },
+                    { name: "20+ min",   value: "20+" }
+                ]
+            },
+            {
+                id: "quality",
+                name: "Quality",
+                isMultiSelect: false,
+                filters: [
+                    { name: "Any", value: "" },
+                    { name: "4K",  value: "4K" },
+                    { name: "QHD", value: "QHD" },
+                    { name: "FHD", value: "FHD" },
+                    { name: "HD",  value: "HD" },
+                    { name: "SD",  value: "SD" }
+                ]
+            }
         ]
     };
 };
 
 function buildSearchFilterParams(order, filters) {
     const out = {};
-    if (order && SORT_MAP[order] !== undefined) {
-        if (SORT_MAP[order]) out.sort = SORT_MAP[order];
+    if (order && SORT_MAP[order] !== undefined && SORT_MAP[order] !== "") {
+        out.sort = SORT_MAP[order];
     }
-    if (filters) {
-        const date = pickFilter(filters, "Date");
+    if (filters && typeof filters === "object") {
+        const date = pickFilter(filters, "date");
         if (date && DATE_DAYS[date]) {
             const from = new Date(Date.now() - DATE_DAYS[date] * 24 * 3600 * 1000);
             out.uploadDateFrom = from.toISOString();
         }
-        const dur = pickFilter(filters, "Duration");
+        const dur = pickFilter(filters, "duration");
         if (dur && DURATION_MAP[dur]) Object.assign(out, DURATION_MAP[dur]);
-        const q = pickFilter(filters, "Quality");
+        const q = pickFilter(filters, "quality");
         if (q && QUALITY_MAP[q]) Object.assign(out, QUALITY_MAP[q]);
     }
     return out;
 }
 
-function pickFilter(filters, name) {
+function pickFilter(filters, id) {
     if (!filters) return null;
-    const v = filters[name];
+    const v = filters[id];
     if (Array.isArray(v)) return v.length ? v[0] : null;
     return v || null;
 }
@@ -504,6 +582,13 @@ source.getContentDetails = function(url) {
     if (typeof v.watchProgress === "number" && v.watchProgress > 0) {
         try { details.playbackTime = Math.floor(v.watchProgress); } catch (e) { /* ignore */ }
     }
+    // Grayjay reads recommended videos from a method on the details object
+    // itself (see uarasio/SB-GJ for the same pattern). Without this hook the
+    // "More videos" rail under a video stays empty even if
+    // source.getContentRecommendations is defined.
+    details.getContentRecommendations = function() {
+        return source.getContentRecommendations(url, details);
+    };
     return details;
 };
 

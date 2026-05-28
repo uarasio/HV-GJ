@@ -296,17 +296,24 @@ test("getSearchCapabilities exposes sort + Date/Duration/Quality filters", () =>
     const caps = source.getSearchCapabilities();
     if (!caps.sorts || caps.sorts.indexOf("Newest") < 0) throw new Error("missing Newest sort");
     if (!caps.sorts || caps.sorts.indexOf("Most Liked") < 0) throw new Error("missing Most Liked sort");
-    const names = (caps.filters || []).map(f => f.name);
-    ["Date", "Duration", "Quality"].forEach(n => {
-        if (names.indexOf(n) < 0) throw new Error("missing filter: " + n);
+    const ids = (caps.filters || []).map(f => f.id);
+    ["date", "duration", "quality"].forEach(n => {
+        if (ids.indexOf(n) < 0) throw new Error("missing filter id: " + n);
     });
-    return `sorts=${caps.sorts.length}, filters=${names.join(",")}`;
+    return `sorts=${caps.sorts.length}, filter ids=${ids.join(",")}`;
+});
+
+test("getContentDetails attaches getContentRecommendations on the details object", () => {
+    const d = source.getContentDetails("https://pmvhaven.com/video/Lesson-1-Intro_6a15e622da44ec6ac850042e");
+    if (typeof d.getContentRecommendations !== "function") throw new Error("missing details.getContentRecommendations");
+    const recPager = d.getContentRecommendations();
+    if (!recPager.results || recPager.results.length === 0) throw new Error("recs empty via details hook");
+    return `${recPager.results.length} recs via details.getContentRecommendations()`;
 });
 
 test("search with sort=Newest hits sort=-uploadDate", () => {
     const pager = source.search("hypno", "MIXED", "Newest", null);
     if (!pager.results || pager.results.length === 0) throw new Error("no results");
-    // first 5 should all be recent (within last 60 days) when sort=Newest
     const cutoff = Math.floor(Date.now() / 1000) - 60 * 24 * 3600;
     const sample = pager.results.slice(0, 5);
     const recent = sample.filter(v => v.datetime >= cutoff).length;
@@ -314,18 +321,48 @@ test("search with sort=Newest hits sort=-uploadDate", () => {
     return `${pager.results.length} videos, ${recent}/5 recent`;
 });
 
-test("search with Duration=20+ min returns only long videos", () => {
-    const pager = source.search("hypno", "MIXED", null, { Duration: "20+ min" });
+test("search filters use array values (Grayjay format) — Duration=[20+]", () => {
+    const pager = source.search("hypno", "MIXED", null, { duration: ["20+"] });
     if (!pager.results || pager.results.length === 0) throw new Error("no results");
     const short = pager.results.filter(v => v.duration < 20 * 60).length;
     if (short > 0) throw new Error(`${short} videos shorter than 20min leaked through`);
     return `${pager.results.length} videos, all ≥ 20min`;
 });
 
-test("search with Quality=FHD returns 1080p+ videos", () => {
-    const pager = source.search("hypno", "MIXED", null, { Quality: "FHD" });
+test("search filters Quality=[FHD] returns 1080p+ videos", () => {
+    const pager = source.search("hypno", "MIXED", null, { quality: ["FHD"] });
     if (!pager.results || pager.results.length === 0) throw new Error("no results");
     return `${pager.results.length} videos`;
+});
+
+test("search filters date=[7days] applies uploadDateFrom", () => {
+    const pager = source.search("hypno", "MIXED", null, { date: ["7days"] });
+    if (!pager.results) throw new Error("null");
+    return `${pager.results.length} videos`;
+});
+
+test("getSearchCapabilities exposes Grayjay-shaped filters (id + isMultiSelect)", () => {
+    const caps = source.getSearchCapabilities();
+    const f = caps.filters;
+    if (!Array.isArray(f) || f.length !== 3) throw new Error("expected 3 filter groups");
+    const ids = f.map(x => x.id).sort();
+    if (ids.join(",") !== "date,duration,quality") throw new Error("bad filter ids: " + ids);
+    f.forEach(g => {
+        if (typeof g.isMultiSelect === "undefined") throw new Error("missing isMultiSelect on " + g.id);
+        if (!Array.isArray(g.filters)) throw new Error("missing filters array on " + g.id);
+        g.filters.forEach(opt => {
+            if (typeof opt.name !== "string" || typeof opt.value !== "string") {
+                throw new Error("bad option in " + g.id);
+            }
+        });
+    });
+    return `OK (${f.map(x => x.id).join(",")})`;
+});
+
+test("source.login() always returns true (no 'cancelled' in Grayjay)", () => {
+    const r = source.login();
+    if (r !== true) throw new Error("login must return true so Grayjay does not say 'cancelled'");
+    return "true";
 });
 
 test("actionLike returns false (no auth) without throwing", () => {
