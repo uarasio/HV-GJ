@@ -257,14 +257,13 @@ source.saveState = function() {
 };
 
 source.getCapabilities = function() {
-    // Always advertise sync support so Grayjay surfaces its built-in
-    // "Sync" tab ("Synchronization of platform data — Sync Remote History
-    // from this platform on startup"). Grayjay itself remembers the user's
-    // on/off choice; the plugin just needs to declare the capability.
+    // Mirrors SB-GJ exactly: a single capability key so Grayjay surfaces its
+    // built-in "Sync" section ("Synchronization of platform data — Sync Remote
+    // History from this platform on startup"). `pluginSettings.syncRemoteHistory`
+    // defaults to `true`, so this always reports `true` unless the user
+    // explicitly disables it in the Sync tab.
     return {
-        hasSyncRemoteWatchHistory: true,
-        hasGetUserSubscriptions: true,
-        hasGetUserPlaylists: true
+        hasSyncRemoteWatchHistory: pluginSettings.syncRemoteHistory
     };
 };
 
