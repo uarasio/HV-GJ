@@ -355,11 +355,16 @@ function tryParseSession(res) {
     try {
         const json = JSON.parse(body);
         const user = json.user || (json.session && json.session.user) || json.data;
-        if (user && (user.id || user._id || user.userId)) {
-            state.userId = user.id || user._id || user.userId;
-            state.username = user.username || user.name || state.username || "";
-            return true;
-        }
+        if (!user) return false;
+        // PMVHaven's API uses `customUserId` (24-char hex) for /api/users/...
+        // endpoints (subscriptions, playlists?owner=...). The better-auth
+        // `id` field is a separate internal id that those endpoints reject.
+        // Prefer customUserId; fall back to other variants only if missing.
+        const uid = user.customUserId || user._id || user.userId || user.id;
+        if (!uid) return false;
+        state.userId = uid;
+        state.username = user.username || user.name || state.username || "";
+        return true;
     } catch (e) { /* ignore */ }
     return false;
 }
@@ -925,11 +930,75 @@ function buildComment(c, videoUrl, videoId, parentForReplies) {
 
 // ---------- playlist ----------
 
+// Virtual playlist URLs for the logged-in user's personal lists. They map
+// 1:1 to dedicated API endpoints (favorites / watch-later) and are exposed
+// alongside real playlists so Grayjay's "Import Playlists" picks them up.
+const VPL_FAVORITES   = BASE_URL + "/user/favorites";
+const VPL_WATCH_LATER = BASE_URL + "/user/watch-later";
+
+function isVirtualPlaylistUrl(url) {
+    return url === VPL_FAVORITES || url === VPL_WATCH_LATER;
+}
+
+function fetchVirtualPlaylist(kind) {
+    // kind: "favorites" | "watch-later"
+    // Pages through the full list and returns a {name, videos[]} payload.
+    const out = [];
+    let page = 1;
+    const limit = 50;
+    while (page <= 20) { // safety cap (1000 videos max per virtual list)
+        const endpoint = (kind === "favorites")
+            ? "/api/user/favorites" + buildQuery({ page: page, limit: limit, sortBy: "added", sortOrder: "desc" })
+            : "/api/user/watch-later" + buildQuery({ page: page, limit: limit });
+        const resp = jsonGETNoThrow(BASE_URL + endpoint, true);
+        if (!resp) break;
+        const items = resp.favorites || resp.videos || resp.data || [];
+        if (!Array.isArray(items) || items.length === 0) break;
+        for (let i = 0; i < items.length; i++) out.push(items[i]);
+        const pag = resp.pagination || {};
+        if (items.length < limit) break;
+        if (typeof pag.totalPages === "number" && page >= pag.totalPages) break;
+        page++;
+    }
+    return {
+        name: (kind === "favorites") ? "Favorites" : "Watch Later",
+        videos: out
+    };
+}
+
 source.isPlaylistUrl = function(url) {
+    if (isVirtualPlaylistUrl(url)) return true;
     return /^https?:\/\/(?:www\.)?pmvhaven\.com\/playlists\/[a-f0-9]{24}/i.test(url);
 };
 
 source.getPlaylist = function(url) {
+    // Virtual playlists (favorites / watch-later) are session-scoped lists
+    // populated from dedicated endpoints.
+    if (isVirtualPlaylistUrl(url)) {
+        if (!source.isLoggedIn()) throw new ScriptException("Login required for " + url);
+        const kind = (url === VPL_FAVORITES) ? "favorites" : "watch-later";
+        const pl = fetchVirtualPlaylist(kind);
+        const author = state.username
+            ? new PlatformAuthorLink(
+                new PlatformID(PLATFORM, state.username, config.id),
+                state.username,
+                channelUrlFromUsername(state.username),
+                ""
+              )
+            : new PlatformAuthorLink(new PlatformID(PLATFORM, "", config.id), "", "", "");
+        const videos = pl.videos.map(toPlatformVideo);
+        return new PlatformPlaylistDetails({
+            id: new PlatformID(PLATFORM, kind, config.id),
+            name: pl.name,
+            thumbnail: videos.length && videos[0] ? "" : "",
+            author: author,
+            datetime: Math.floor(Date.now() / 1000),
+            url: url,
+            videoCount: videos.length,
+            contents: new VideoPager(videos, false)
+        });
+    }
+
     const id = extractPlaylistIdFromUrl(url);
     if (!id) throw new ScriptException("Invalid playlist URL: " + url);
     const resp = jsonGETNoThrow(BASE_URL + "/api/playlists/" + id);
@@ -963,15 +1032,41 @@ source.getPlaylist = function(url) {
 
 source.getUserSubscriptions = function() {
     // Returns list of channel URLs the logged-in user is subscribed to.
+    // PMVHaven returns at most `limit` per page; iterate until exhausted so
+    // big subscription lists migrate fully into Grayjay.
     try {
         if (!source.isLoggedIn()) {
             log("getUserSubscriptions: not logged in");
             return [];
         }
+        if (!state.userId) { fetchUserInfo(); }
         if (!state.userId) return [];
-        const resp = jsonGETNoThrow(BASE_URL + "/api/users/" + state.userId + "/subscriptions", true);
-        const list = (resp && resp.data) || [];
-        return list.filter(u => u && u.username).map(u => channelUrlFromUsername(u.username));
+
+        const seen = {};
+        const out = [];
+        let page = 1;
+        const limit = 100;
+        while (page <= 50) { // safety cap
+            const resp = jsonGETNoThrow(
+                BASE_URL + "/api/users/" + state.userId + "/subscriptions" +
+                buildQuery({ page: page, limit: limit }), true);
+            if (!resp || resp.success === false) break;
+            const list = resp.data || [];
+            if (!Array.isArray(list) || list.length === 0) break;
+            for (let i = 0; i < list.length; i++) {
+                const u = list[i];
+                if (!u || !u.username || seen[u.username]) continue;
+                seen[u.username] = true;
+                out.push(channelUrlFromUsername(u.username));
+            }
+            const pag = resp.pagination || {};
+            if (list.length < limit) break;
+            if (pag.hasMore === false) break;
+            if (typeof pag.totalPages === "number" && page >= pag.totalPages) break;
+            page++;
+        }
+        log("getUserSubscriptions: returning " + out.length + " channel(s)");
+        return out;
     } catch (e) {
         log("getUserSubscriptions error: " + e);
         return [];
@@ -979,21 +1074,53 @@ source.getUserSubscriptions = function() {
 };
 
 source.getUserPlaylists = function() {
-    // Returns list of playlist URLs owned by the logged-in user.
+    // Returns list of playlist URLs owned by the logged-in user, plus the
+    // virtual Favorites and Watch Later playlists so Grayjay's "Import
+    // Playlists" picks all three up in one go.
     try {
         if (!source.isLoggedIn()) {
             log("getUserPlaylists: not logged in");
             return [];
         }
-        if (!state.userId && !state.username) return [];
-        const ownerParam = state.userId || state.username;
-        const resp = jsonGETNoThrow(BASE_URL + "/api/playlists" + buildQuery({
-            owner: ownerParam,
-            isPublic: true,
-            limit: 100
-        }), true);
-        const list = (resp && resp.data) || [];
-        return list.filter(pl => pl && pl._id).map(pl => playlistUrlFromId(pl._id));
+        if (!state.userId) { fetchUserInfo(); }
+
+        const out = [];
+
+        // Real, user-created playlists (paginate to be safe).
+        if (state.userId) {
+            const seen = {};
+            let page = 1;
+            const limit = 100;
+            while (page <= 20) {
+                const resp = jsonGETNoThrow(BASE_URL + "/api/playlists" + buildQuery({
+                    owner: state.userId,
+                    page: page,
+                    limit: limit,
+                    sort: "-createdAt"
+                }), true);
+                if (!resp || resp.success === false) break;
+                const list = resp.data || [];
+                if (!Array.isArray(list) || list.length === 0) break;
+                for (let i = 0; i < list.length; i++) {
+                    const pl = list[i];
+                    if (!pl || !pl._id || seen[pl._id]) continue;
+                    seen[pl._id] = true;
+                    out.push(playlistUrlFromId(pl._id));
+                }
+                const meta = resp.meta || {};
+                if (list.length < limit) break;
+                if (meta.hasMore === false) break;
+                if (typeof meta.totalPages === "number" && page >= meta.totalPages) break;
+                page++;
+            }
+        }
+
+        // Virtual session-scoped lists (always available when logged in).
+        out.push(VPL_FAVORITES);
+        out.push(VPL_WATCH_LATER);
+
+        log("getUserPlaylists: returning " + out.length + " playlist(s) (incl. Favorites + Watch Later)");
+        return out;
     } catch (e) {
         log("getUserPlaylists error: " + e);
         return [];
@@ -1009,38 +1136,65 @@ source.syncRemoteWatchHistory = function(continuationToken) {
             return new VideoPager([], false, { token: null });
         }
 
-        // Page through /api/user/watched-video-ids (cookie-auth)
         const page = continuationToken ? parseInt(continuationToken, 10) : 1;
-        const resp = jsonGETNoThrow(BASE_URL + "/api/user/watched-video-ids" + buildQuery({
-            page: page, limit: 50
-        }), true);
-        if (!resp) return new VideoPager([], false, { token: null });
+        const limit = 50;
 
-        // Accept multiple shapes: {data:[ids]}, {videoIds:[]}, {data:[{videoId,watchedAt}]}
-        let entries = resp.data || resp.videoIds || resp.watched || [];
+        // Preferred: /api/user/history returns FULL video objects already
+        // hydrated with watchedAt + watchProgress — no N+1 fetches needed.
+        const resp = jsonGETNoThrow(BASE_URL + "/api/user/history" + buildQuery({
+            page: page, limit: limit
+        }), true);
+
+        if (resp && Array.isArray(resp.history)) {
+            const out = [];
+            for (let i = 0; i < resp.history.length; i++) {
+                const v = resp.history[i];
+                if (!v || !v._id) continue;
+                const pv = toPlatformVideo(v);
+                try {
+                    if (v.watchedAt) pv.playbackDate = parseDateSeconds(v.watchedAt);
+                    if (typeof v.watchProgress === "number") pv.playbackTime = Math.floor(v.watchProgress);
+                } catch (err) { /* ignore */ }
+                out.push(pv);
+            }
+            const pag = resp.pagination || {};
+            const hasMore = (typeof pag.totalPages === "number")
+                ? (page < pag.totalPages)
+                : (out.length >= limit);
+            log("syncRemoteWatchHistory(/history): page=" + page + " returning " + out.length + " items, hasMore=" + hasMore);
+            return new VideoPager(out, hasMore, { token: String(page + 1) });
+        }
+
+        // Fallback: /api/user/watched-video-ids gives just ids; hydrate each
+        // one via /api/videos/<id>. Slower but used only if the primary
+        // endpoint changes shape.
+        const idsResp = jsonGETNoThrow(BASE_URL + "/api/user/watched-video-ids" + buildQuery({
+            page: page, limit: limit
+        }), true);
+        if (!idsResp) return new VideoPager([], false, { token: null });
+        let entries = idsResp.data || idsResp.videoIds || idsResp.watched || [];
         if (!Array.isArray(entries)) entries = [];
 
-        const out = [];
+        const out2 = [];
         const now = Math.floor(Date.now() / 1000);
         for (let i = 0; i < entries.length; i++) {
             const e = entries[i];
             const videoId = typeof e === "string" ? e : (e.videoId || e._id || e.id);
             if (!videoId) continue;
-            const watchedAt = (e && e.watchedAt) ? parseDateSeconds(e.watchedAt) : (now - (page - 1) * 50 * 3600 - i * 3600);
+            const watchedAt = (e && e.watchedAt) ? parseDateSeconds(e.watchedAt) : (now - (page - 1) * limit * 3600 - i * 3600);
             const vd = jsonGETNoThrow(BASE_URL + "/api/videos/" + videoId);
             if (!vd || !vd.data) continue;
             const v = vd.data;
             const pv = toPlatformVideo(v);
-            // Decorate with playback markers (Grayjay reads them from the platform video)
             try {
                 pv.playbackDate = watchedAt;
                 pv.playbackTime = v.watchProgress || 0;
             } catch (err) { /* ignore */ }
-            out.push(pv);
+            out2.push(pv);
         }
-
-        const hasMore = entries.length >= 50;
-        return new VideoPager(out, hasMore, { token: String(page + 1) });
+        const hasMore2 = entries.length >= limit;
+        log("syncRemoteWatchHistory(fallback): page=" + page + " returning " + out2.length + " items, hasMore=" + hasMore2);
+        return new VideoPager(out2, hasMore2, { token: String(page + 1) });
     } catch (e) {
         log("syncRemoteWatchHistory error: " + e);
         return new VideoPager([], false, { token: null });
