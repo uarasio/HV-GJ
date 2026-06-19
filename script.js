@@ -348,13 +348,11 @@ function loadAuthCookies() {
     return false;
 }
 
-function fetchUserInfo() {
-    // Pull username/userId from /api/auth/get-session using current cookies.
+function tryParseSession(res) {
+    if (!res || !res.isOk) return false;
+    const body = (res.body || "").trim();
+    if (!body || body === "null") return false;
     try {
-        const res = http.GET(BASE_URL + "/api/auth/get-session", API_HEADERS, true);
-        if (!res || !res.isOk) return false;
-        const body = (res.body || "").trim();
-        if (!body || body === "null") return false;
         const json = JSON.parse(body);
         const user = json.user || (json.session && json.session.user) || json.data;
         if (user && (user.id || user._id || user.userId)) {
@@ -362,9 +360,31 @@ function fetchUserInfo() {
             state.username = user.username || user.name || state.username || "";
             return true;
         }
-    } catch (e) {
-        log("fetchUserInfo error: " + e);
-    }
+    } catch (e) { /* ignore */ }
+    return false;
+}
+
+function fetchUserInfo() {
+    // Pull username/userId from /api/auth/get-session using current cookies.
+    // Tries Grayjay's auth context first (useAuth=true), then falls back to
+    // sending the captured cookies as an explicit Cookie header. The fallback
+    // is what lets us recognise the login when the user signed in via the
+    // generic "video -> more -> page" web view, instead of the dedicated
+    // Authentication login flow (cookies are still in Grayjay's cookie jar
+    // but may not be flagged as plugin-auth).
+    try {
+        const res1 = http.GET(BASE_URL + "/api/auth/get-session", API_HEADERS, true);
+        if (tryParseSession(res1)) return true;
+    } catch (e) { log("fetchUserInfo(useAuth) error: " + e); }
+
+    try {
+        if (state.authCookies && state.authCookies.length > 0) {
+            const hdrs = Object.assign({}, API_HEADERS, { "Cookie": state.authCookies });
+            const res2 = http.GET(BASE_URL + "/api/auth/get-session", hdrs, false);
+            if (tryParseSession(res2)) return true;
+        }
+    } catch (e) { log("fetchUserInfo(manual cookie) error: " + e); }
+
     return false;
 }
 
@@ -439,14 +459,48 @@ source.login = function() {
     }
 };
 
+// Called by Grayjay just before opening the login web view. Mirroring SB-GJ:
+// wipe any stale auth state and clear residual cookies so the user always
+// starts the login flow fresh (avoids stuck/expired session cookies blocking
+// the cookiesToFind trigger from firing).
+source.prepareLogin = function() {
+    try {
+        state.isAuthenticated = false;
+        state.username = "";
+        state.userId = "";
+        state.authCookies = "";
+        try {
+            if (typeof http.clearCookies === "function") {
+                http.clearCookies("pmvhaven.com");
+                http.clearCookies("www.pmvhaven.com");
+            }
+            if (typeof bridge !== "undefined" && bridge && bridge.clearCookies) {
+                bridge.clearCookies("pmvhaven.com");
+                bridge.clearCookies("www.pmvhaven.com");
+            }
+        } catch (e) { /* ignore */ }
+        log("prepareLogin: cleared stale auth state");
+        return true;
+    } catch (e) {
+        log("prepareLogin error: " + e);
+        return true;
+    }
+};
+
 source.logout = function() {
     state.isAuthenticated = false;
     state.username = "";
     state.userId = "";
     state.authCookies = "";
     try {
-        if (typeof http.clearCookies === "function") http.clearCookies("pmvhaven.com");
-        if (typeof bridge !== "undefined" && bridge && bridge.clearCookies) bridge.clearCookies("pmvhaven.com");
+        if (typeof http.clearCookies === "function") {
+            http.clearCookies("pmvhaven.com");
+            http.clearCookies("www.pmvhaven.com");
+        }
+        if (typeof bridge !== "undefined" && bridge && bridge.clearCookies) {
+            bridge.clearCookies("pmvhaven.com");
+            bridge.clearCookies("www.pmvhaven.com");
+        }
     } catch (e) { /* ignore */ }
 };
 
