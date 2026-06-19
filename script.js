@@ -183,6 +183,51 @@ function toPlatformVideo(v) {
     return pv;
 }
 
+// Build a PlatformVideo for watch-history import. CRITICAL: Grayjay only imports
+// history items whose `playbackDate` is non-null AND `playbackTime > 0`, and it
+// ONLY reads these when they are passed INTO the PlatformVideo constructor — values
+// assigned after construction (pv.playbackTime = ...) are ignored. See
+// StateHistory.syncRemoteHistory (grayjay-android): `if(video.playbackTime > 0)`.
+function createHistoryPlatformVideo(v, watchedSeconds, fallbackOrder) {
+    const id = v._id || v.id || "";
+    const vidurl = videoUrlFromIdTitle(id, v.title || "");
+    const thumbUrl = v.thumbnailUrl || (v.thumbnailSizes && (v.thumbnailSizes.lg || v.thumbnailSizes.md)) || "";
+    const durationSec = (typeof v.durationSeconds === "number" && v.durationSeconds > 0)
+        ? v.durationSeconds
+        : parseDuration(v.duration);
+
+    // playbackDate = when it was watched (unix seconds). Must be > 0.
+    let playbackDate = watchedSeconds && watchedSeconds > 0 ? watchedSeconds : 0;
+    if (!playbackDate) {
+        // Preserve descending order even without a server timestamp.
+        playbackDate = Math.floor(Date.now() / 1000) - (fallbackOrder || 0) * 60;
+    }
+
+    // playbackTime = resume position (seconds). MUST be > 0 or Grayjay drops it.
+    let playbackTime;
+    if (typeof v.watchProgress === "number" && v.watchProgress > 0) {
+        playbackTime = Math.floor(v.watchProgress);
+    } else {
+        // Completed/unknown items: use half the duration (>=60s) so they still import.
+        playbackTime = Math.max(60, Math.floor((durationSec || 300) * 0.5));
+    }
+
+    return new PlatformVideo({
+        id: new PlatformID(PLATFORM, id, config.id),
+        name: v.title || "Untitled",
+        thumbnails: thumbUrl ? new Thumbnails([new Thumbnail(thumbUrl, 720)]) : new Thumbnails([]),
+        author: createAuthor(v.uploader, v.uploaderUsername, v.uploaderAvatarUrl),
+        datetime: parseDateSeconds(v.uploadDate || v.createdAt) || playbackDate,
+        duration: durationSec,
+        viewCount: v.views || 0,
+        url: vidurl,
+        isLive: false,
+        // MUST be in the constructor for Grayjay to import the history item.
+        playbackDate: playbackDate,
+        playbackTime: playbackTime
+    });
+}
+
 function toPlatformChannel(user, subscriberCount) {
     const username = user.username || "";
     return new PlatformChannel({
@@ -1217,25 +1262,14 @@ source.syncRemoteWatchHistory = function(continuationToken) {
             return new VideoPager([], false, { token: null });
         }
 
-        // Build PlatformVideo objects and attach playbackDate / playbackTime.
-        const now = Math.floor(Date.now() / 1000);
+        // Build PlatformVideo objects with playbackDate / playbackTime set IN the
+        // constructor (Grayjay ignores them otherwise — see createHistoryPlatformVideo).
         const out = [];
         for (let i = 0; i < allItems.length; i++) {
             const v = allItems[i];
             if (!v || !v._id) continue;
-            const pv = toPlatformVideo(v);
-            try {
-                if (v.watchedAt) {
-                    pv.playbackDate = parseDateSeconds(v.watchedAt);
-                } else {
-                    // Keep ordering even without a server timestamp.
-                    pv.playbackDate = now - i * 60;
-                }
-                if (typeof v.watchProgress === "number") {
-                    pv.playbackTime = Math.floor(v.watchProgress);
-                }
-            } catch (err) { /* ignore */ }
-            out.push(pv);
+            const watchedSeconds = parseDateSeconds(v.watchedAt || v.lastWatchedAt);
+            out.push(createHistoryPlatformVideo(v, watchedSeconds, i));
         }
 
         log("syncRemoteWatchHistory: returning " + out.length + " total history items");
