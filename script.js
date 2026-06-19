@@ -14,7 +14,10 @@ const API_HEADERS = {
 
 var config = {};
 var pluginSettings = {
-    syncRemoteHistory: false
+    // Default ON so Grayjay shows its built-in "Sync" tab and the
+    // "Sync Remote History from this platform on startup" toggle as soon
+    // as the user logs in. Mirrors SB-GJ exactly.
+    syncRemoteHistory: true
 };
 var state = {
     isAuthenticated: false,
@@ -254,8 +257,12 @@ source.saveState = function() {
 };
 
 source.getCapabilities = function() {
+    // Always advertise sync support so Grayjay surfaces its built-in
+    // "Sync" tab ("Synchronization of platform data — Sync Remote History
+    // from this platform on startup"). Grayjay itself remembers the user's
+    // on/off choice; the plugin just needs to declare the capability.
     return {
-        hasSyncRemoteWatchHistory: !!pluginSettings.syncRemoteHistory,
+        hasSyncRemoteWatchHistory: true,
         hasGetUserSubscriptions: true,
         hasGetUserPlaylists: true
     };
@@ -1130,73 +1137,104 @@ source.getUserPlaylists = function() {
 // ---------- remote watch history ----------
 
 source.syncRemoteWatchHistory = function(continuationToken) {
+    // IMPORTANT: Grayjay's startup sync only consumes the first page returned
+    // by this function (its pager loop has a hard cap). To import the entire
+    // history we paginate through PMVHaven internally and return everything
+    // in a single VideoPager with hasMore=false. Same approach as SB-GJ.
     try {
+        log("===== syncRemoteWatchHistory START =====");
         if (!source.isLoggedIn()) {
-            log("syncRemoteWatchHistory: not logged in");
+            log("syncRemoteWatchHistory: not logged in, skipping");
             return new VideoPager([], false, { token: null });
         }
 
-        const page = continuationToken ? parseInt(continuationToken, 10) : 1;
-        const limit = 50;
+        const MAX_PAGES = 100;
+        const PAGE_LIMIT = 48;
+        let allItems = [];
+        let usedPrimary = true;
 
-        // Preferred: /api/user/history returns FULL video objects already
-        // hydrated with watchedAt + watchProgress — no N+1 fetches needed.
-        const resp = jsonGETNoThrow(BASE_URL + "/api/user/history" + buildQuery({
-            page: page, limit: limit
-        }), true);
+        // Primary endpoint: /api/user/history returns hydrated video objects
+        // with watchedAt + watchProgress in one shot.
+        for (let page = 1; page <= MAX_PAGES; page++) {
+            const resp = jsonGETNoThrow(BASE_URL + "/api/user/history" + buildQuery({
+                page: page, limit: PAGE_LIMIT, filter: "all", _t: Date.now()
+            }), true);
 
-        if (resp && Array.isArray(resp.history)) {
-            const out = [];
-            for (let i = 0; i < resp.history.length; i++) {
-                const v = resp.history[i];
-                if (!v || !v._id) continue;
-                const pv = toPlatformVideo(v);
-                try {
-                    if (v.watchedAt) pv.playbackDate = parseDateSeconds(v.watchedAt);
-                    if (typeof v.watchProgress === "number") pv.playbackTime = Math.floor(v.watchProgress);
-                } catch (err) { /* ignore */ }
-                out.push(pv);
+            if (!resp) {
+                if (page === 1) { usedPrimary = false; break; }
+                log("syncRemoteWatchHistory: /history page " + page + " failed, stopping pagination");
+                break;
             }
+            if (resp.success === false || !Array.isArray(resp.history)) {
+                if (page === 1) { usedPrimary = false; break; }
+                break;
+            }
+            const items = resp.history;
+            log("syncRemoteWatchHistory: /history page " + page + " -> " + items.length + " items");
+            if (items.length === 0) break;
+            allItems = allItems.concat(items);
+
             const pag = resp.pagination || {};
-            const hasMore = (typeof pag.totalPages === "number")
-                ? (page < pag.totalPages)
-                : (out.length >= limit);
-            log("syncRemoteWatchHistory(/history): page=" + page + " returning " + out.length + " items, hasMore=" + hasMore);
-            return new VideoPager(out, hasMore, { token: String(page + 1) });
+            if (typeof pag.totalPages === "number" && page >= pag.totalPages) break;
+            if (items.length < PAGE_LIMIT) break;
         }
 
-        // Fallback: /api/user/watched-video-ids gives just ids; hydrate each
-        // one via /api/videos/<id>. Slower but used only if the primary
-        // endpoint changes shape.
-        const idsResp = jsonGETNoThrow(BASE_URL + "/api/user/watched-video-ids" + buildQuery({
-            page: page, limit: limit
-        }), true);
-        if (!idsResp) return new VideoPager([], false, { token: null });
-        let entries = idsResp.data || idsResp.videoIds || idsResp.watched || [];
-        if (!Array.isArray(entries)) entries = [];
+        // Fallback: /api/user/watched-video-ids -> hydrate per id.
+        if (!usedPrimary) {
+            log("syncRemoteWatchHistory: /history unavailable, falling back to /watched-video-ids");
+            for (let page = 1; page <= MAX_PAGES; page++) {
+                const resp = jsonGETNoThrow(BASE_URL + "/api/user/watched-video-ids" + buildQuery({
+                    page: page, limit: PAGE_LIMIT
+                }), true);
+                if (!resp) break;
+                let entries = resp.data || resp.videoIds || resp.watched || [];
+                if (!Array.isArray(entries) || entries.length === 0) break;
+                for (let i = 0; i < entries.length; i++) {
+                    const e = entries[i];
+                    const videoId = typeof e === "string" ? e : (e && (e.videoId || e._id || e.id));
+                    if (!videoId) continue;
+                    const watchedAt = (e && e.watchedAt) || null;
+                    const vd = jsonGETNoThrow(BASE_URL + "/api/videos/" + videoId);
+                    if (!vd || !vd.data) continue;
+                    const v = vd.data;
+                    if (watchedAt && !v.watchedAt) v.watchedAt = watchedAt;
+                    allItems.push(v);
+                }
+                if (entries.length < PAGE_LIMIT) break;
+            }
+        }
 
-        const out2 = [];
+        if (allItems.length === 0) {
+            log("syncRemoteWatchHistory: no history found");
+            return new VideoPager([], false, { token: null });
+        }
+
+        // Build PlatformVideo objects and attach playbackDate / playbackTime.
         const now = Math.floor(Date.now() / 1000);
-        for (let i = 0; i < entries.length; i++) {
-            const e = entries[i];
-            const videoId = typeof e === "string" ? e : (e.videoId || e._id || e.id);
-            if (!videoId) continue;
-            const watchedAt = (e && e.watchedAt) ? parseDateSeconds(e.watchedAt) : (now - (page - 1) * limit * 3600 - i * 3600);
-            const vd = jsonGETNoThrow(BASE_URL + "/api/videos/" + videoId);
-            if (!vd || !vd.data) continue;
-            const v = vd.data;
+        const out = [];
+        for (let i = 0; i < allItems.length; i++) {
+            const v = allItems[i];
+            if (!v || !v._id) continue;
             const pv = toPlatformVideo(v);
             try {
-                pv.playbackDate = watchedAt;
-                pv.playbackTime = v.watchProgress || 0;
+                if (v.watchedAt) {
+                    pv.playbackDate = parseDateSeconds(v.watchedAt);
+                } else {
+                    // Keep ordering even without a server timestamp.
+                    pv.playbackDate = now - i * 60;
+                }
+                if (typeof v.watchProgress === "number") {
+                    pv.playbackTime = Math.floor(v.watchProgress);
+                }
             } catch (err) { /* ignore */ }
-            out2.push(pv);
+            out.push(pv);
         }
-        const hasMore2 = entries.length >= limit;
-        log("syncRemoteWatchHistory(fallback): page=" + page + " returning " + out2.length + " items, hasMore=" + hasMore2);
-        return new VideoPager(out2, hasMore2, { token: String(page + 1) });
+
+        log("syncRemoteWatchHistory: returning " + out.length + " total history items");
+        log("===== syncRemoteWatchHistory END =====");
+        return new VideoPager(out, false, { token: null });
     } catch (e) {
-        log("syncRemoteWatchHistory error: " + e);
+        log("syncRemoteWatchHistory: exception " + e);
         return new VideoPager([], false, { token: null });
     }
 };

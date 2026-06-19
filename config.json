@@ -8,7 +8,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/HV-GJ/refs/heads/main/config.json",
   "repositoryUrl": "https://github.com/uarasio/HV-GJ",
   "scriptUrl": "./script.js",
-  "version": 28,
+  "version": 29,
 
   "iconUrl": "./logo.png",
   "id": "03fb92a4-f857-4f45-a7bf-00c1660e75cb",
@@ -34,15 +34,7 @@
     "cookiesExclOthers": false
   },
 
-  "settings": [
-    {
-      "variable": "syncRemoteHistory",
-      "name": "Sync Remote History",
-      "description": "When enabled, your PMVHaven watch history will be imported into Grayjay (requires login).",
-      "type": "Boolean",
-      "default": "false"
-    }
-  ],
+  "settings": [],
 
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
