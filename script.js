@@ -886,15 +886,23 @@ source.getChannel = function(url) {
 
 source.getChannelCapabilities = function() {
     return {
-        types: [Type.Feed.Videos],
+        // Declaring Playlists here is what makes the desktop client render a
+        // "Playlists" section on the channel page (it dispatches to
+        // getChannelContents with type=Playlists). Android detects the
+        // getChannelPlaylists hook by presence instead.
+        types: [Type.Feed.Videos, Type.Feed.Playlists],
         sorts: [Type.Order.Chronological],
         filters: []
     };
 };
 
-source.getChannelContents = function(url) {
+source.getChannelContents = function(url, type, order, filters) {
     const token = extractUsernameFromProfileUrl(url);
     if (!token) return new ContentPager([], false);
+    // Desktop asks for a channel's playlists through this same entry point.
+    if (type === Type.Feed.Playlists) {
+        return new ChannelPlaylistsPager(token);
+    }
     // Channel video listing keys off the username; resolve id-based profile
     // URLs (pmvhaven uses the user _id in profile links) to the username first.
     let username = token;
