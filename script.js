@@ -135,6 +135,23 @@ function extractPlaylistIdFromUrl(url) {
     return m ? m[1] : null;
 }
 
+function isObjectId(s) {
+    return typeof s === "string" && /^[a-f0-9]{24}$/i.test(s);
+}
+
+// Resolve a profile token (which may be a username OR a 24-char user id, since
+// pmvhaven.com profile URLs use the user's _id) into the full user document.
+function fetchUserByToken(token) {
+    if (!token) return null;
+    if (isObjectId(token)) {
+        const byId = jsonGETNoThrow(BASE_URL + "/api/users/" + token);
+        if (byId && byId.data) return byId.data;
+    }
+    const byName = jsonGETNoThrow(BASE_URL + "/api/users/by-username/" + encodeURIComponent(token));
+    if (byName && byName.data) return byName.data;
+    return null;
+}
+
 // ---------- builders ----------
 
 function createAuthor(uploaderName, uploaderUsername, uploaderAvatarUrl) {
@@ -251,6 +268,30 @@ function cleanSocialLinks(links) {
         if (v && typeof v === "string" && v.length > 0) out[map[k]] = v;
     }
     return out;
+}
+
+function toPlatformPlaylist(p) {
+    const ownerName = p.ownerUsername || p.owner || "";
+    const author = ownerName
+        ? new PlatformAuthorLink(
+            new PlatformID(PLATFORM, ownerName, config.id),
+            ownerName,
+            channelUrlFromUsername(ownerName),
+            p.ownerAvatarUrl || ""
+          )
+        : new PlatformAuthorLink(new PlatformID(PLATFORM, "", config.id), "", "", "");
+    const count = (typeof p.validVideoCount === "number") ? p.validVideoCount
+        : (typeof p.videoCount === "number") ? p.videoCount
+        : (Array.isArray(p.videos) ? p.videos.length : 0);
+    return new PlatformPlaylist({
+        id: new PlatformID(PLATFORM, p._id, config.id),
+        name: p.name || "Playlist",
+        thumbnail: p.thumbnailUrl || p.thumbnail || "",
+        author: author,
+        datetime: parseDateSeconds(p.createdAt),
+        url: playlistUrlFromId(p._id),
+        videoCount: count
+    });
 }
 
 // ---------- source plugin ----------
@@ -728,6 +769,10 @@ function pickFilterAll(filters, id) {
 }
 
 source.search = function(query, type, order, filters) {
+    // Pasting a pmvhaven.com link into search resolves it to the exact item
+    // (playlist, profile or video) instead of a fuzzy text match.
+    const direct = trySearchDirectUrl(query);
+    if (direct) return direct;
     if (type === Type.Feed.Channels) return source.searchChannels(query);
     if (type === Type.Feed.Playlists) return source.searchPlaylists(query);
     const extra = buildSearchFilterParams(order, filters);
@@ -771,6 +816,49 @@ source.searchPlaylists = function(query) {
     return new PlaylistsApiPager(query);
 };
 
+// When the search box contains a pmvhaven.com URL, return the exact entity it
+// points at as a single-result feed. Handles playlist, profile and video links
+// (with or without the leading https://). Returns null for normal text queries.
+function normalizePmvUrl(q) {
+    q = (q || "").trim();
+    if (/^https?:\/\//i.test(q)) return q;
+    const i = q.toLowerCase().indexOf("pmvhaven.com");
+    if (i < 0) return q;
+    return "https://" + q.slice(i);
+}
+
+function trySearchDirectUrl(query) {
+    if (!query || typeof query !== "string") return null;
+    if (query.toLowerCase().indexOf("pmvhaven.com") < 0) return null;
+    const url = normalizePmvUrl(query);
+    try {
+        // Playlist link -> the playlist card.
+        if (/\/playlists?\//i.test(url)) {
+            const plId = extractPlaylistIdFromUrl(url);
+            if (plId) {
+                const resp = jsonGETNoThrow(BASE_URL + "/api/playlists/" + plId);
+                if (resp && resp.data) return new ContentPager([toPlatformPlaylist(resp.data)], false);
+            }
+        }
+        // Video link -> the video card.
+        if (source.isContentDetailsUrl(url)) {
+            const vid = extractVideoIdFromUrl(url);
+            if (vid) {
+                const r = jsonGETNoThrow(BASE_URL + "/api/videos/" + vid);
+                if (r && r.data) return new ContentPager([toPlatformVideo(r.data)], false);
+            }
+        }
+        // Profile link -> the channel card.
+        if (source.isChannelUrl(url)) {
+            try { return new ContentPager([source.getChannel(url)], false); }
+            catch (e) { /* fall through */ }
+        }
+    } catch (e) {
+        log("trySearchDirectUrl error: " + e);
+    }
+    return null;
+}
+
 // ---------- channel ----------
 
 source.isChannelUrl = function(url) {
@@ -778,14 +866,13 @@ source.isChannelUrl = function(url) {
 };
 
 source.getChannel = function(url) {
-    const username = extractUsernameFromProfileUrl(url);
-    if (!username) throw new ScriptException("Invalid channel URL: " + url);
+    const token = extractUsernameFromProfileUrl(url);
+    if (!token) throw new ScriptException("Invalid channel URL: " + url);
 
-    const profile = jsonGETNoThrow(BASE_URL + "/api/users/by-username/" + encodeURIComponent(username));
-    if (!profile || !profile.data) {
-        throw new ScriptException("Profile not found for " + username);
+    const userData = fetchUserByToken(token);
+    if (!userData) {
+        throw new ScriptException("Profile not found for " + token);
     }
-    const userData = profile.data;
     const userId = userData._id;
 
     let subCount = 0;
@@ -806,13 +893,29 @@ source.getChannelCapabilities = function() {
 };
 
 source.getChannelContents = function(url) {
-    const username = extractUsernameFromProfileUrl(url);
+    const token = extractUsernameFromProfileUrl(url);
+    if (!token) return new ContentPager([], false);
+    // Channel video listing keys off the username; resolve id-based profile
+    // URLs (pmvhaven uses the user _id in profile links) to the username first.
+    let username = token;
+    if (isObjectId(token)) {
+        const u = fetchUserByToken(token);
+        username = u && u.username;
+    }
     if (!username) return new ContentPager([], false);
     return new ChannelVideosPager(username);
 };
 
 source.getChannelVideos = function(url) {
     return source.getChannelContents(url);
+};
+
+// Grayjay shows a "Playlists" tab on the channel page when this optional hook
+// is present. Lists every public playlist created by the profile's owner.
+source.getChannelPlaylists = function(url) {
+    const token = extractUsernameFromProfileUrl(url);
+    if (!token) return new PlaylistPager([], false);
+    return new ChannelPlaylistsPager(token);
 };
 
 // ---------- video ----------
@@ -879,10 +982,10 @@ source.getContentDetails = function(url) {
 
 source.actionSubscribe = function(channelUrl, subscribe) {
     try {
-        const username = extractUsernameFromProfileUrl(channelUrl);
-        if (!username) return false;
-        const profile = jsonGETNoThrow(BASE_URL + "/api/users/by-username/" + encodeURIComponent(username));
-        const userId = profile && profile.data && profile.data._id;
+        const token = extractUsernameFromProfileUrl(channelUrl);
+        if (!token) return false;
+        const userData = fetchUserByToken(token);
+        const userId = userData && userData._id;
         if (!userId) return false;
         const r = jsonRequest("PUT", BASE_URL + "/api/users/" + userId + "/subscribe",
             { action: subscribe === false ? "unsubscribe" : "subscribe" }, true);
@@ -1367,29 +1470,47 @@ class PlaylistsApiPager extends PlaylistPager {
             const p = list[i];
             if (!p || !p._id || this.seen[p._id]) continue;
             this.seen[p._id] = true;
-            const ownerName = p.ownerUsername || "";
-            const author = ownerName
-                ? new PlatformAuthorLink(
-                    new PlatformID(PLATFORM, ownerName, config.id),
-                    ownerName,
-                    channelUrlFromUsername(ownerName),
-                    ""
-                  )
-                : new PlatformAuthorLink(new PlatformID(PLATFORM, "", config.id), "", "", "");
-            out.push(new PlatformPlaylist({
-                id: new PlatformID(PLATFORM, p._id, config.id),
-                name: p.name || "Playlist",
-                thumbnail: p.thumbnailUrl || "",
-                author: author,
-                datetime: parseDateSeconds(p.createdAt),
-                url: playlistUrlFromId(p._id),
-                videoCount: p.videoCount || 0
-            }));
+            out.push(toPlatformPlaylist(p));
         }
         this.results = out;
         const meta = (data && data.meta) || {};
         if (typeof meta.hasMore === "boolean") this.hasMore = meta.hasMore;
         else this.hasMore = list.length >= 20;
+        return this;
+    }
+}
+
+// Lists the playlists created by a single profile owner. `owner` may be a
+// username or a 24-char user id — pmvhaven's /api/playlists?owner= accepts both.
+class ChannelPlaylistsPager extends PlaylistPager {
+    constructor(owner) {
+        super([], true);
+        this.owner = owner;
+        this.page = 0;
+        this.seen = {};
+        this.nextPage();
+    }
+    nextPage() {
+        this.page++;
+        const url = BASE_URL + "/api/playlists" + buildQuery({
+            owner: this.owner, page: this.page, limit: 30, sort: "-createdAt"
+        });
+        const data = jsonGETNoThrow(url);
+        const list = (data && data.data) || [];
+        const out = [];
+        for (let i = 0; i < list.length; i++) {
+            const p = list[i];
+            if (!p || !p._id || this.seen[p._id]) continue;
+            // The unauthenticated owner endpoint also returns private playlists;
+            // only surface public ones on a profile's Playlists tab.
+            if (p.isPublic === false) continue;
+            this.seen[p._id] = true;
+            out.push(toPlatformPlaylist(p));
+        }
+        this.results = out;
+        const meta = (data && data.meta) || {};
+        if (typeof meta.hasMore === "boolean") this.hasMore = meta.hasMore;
+        else this.hasMore = list.length >= 30;
         return this;
     }
 }
