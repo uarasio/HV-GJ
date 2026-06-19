@@ -1186,9 +1186,17 @@ source.getPlaylist = function(url) {
         });
     }
 
-    const id = extractPlaylistIdFromUrl(url);
+        const id = extractPlaylistIdFromUrl(url);
     if (!id) throw new ScriptException("Invalid playlist URL: " + url);
-    const resp = jsonGETNoThrow(BASE_URL + "/api/playlists/" + id);
+    // Always request page 1 explicitly so we can paginate the rest. PMVHaven's
+    // /api/playlists/{id} endpoint returns at most `limit` videos per call
+    // (default 50). Without paging, large playlists (e.g. 162 videos) were
+    // truncated to the first page.
+    const PLAYLIST_PAGE_LIMIT = 50;
+    const resp = jsonGETNoThrow(BASE_URL + "/api/playlists/" + id + buildQuery({
+        page: 1,
+        limit: PLAYLIST_PAGE_LIMIT
+    }));
     if (!resp || !resp.data) throw new ScriptException("Playlist not found: " + id);
     const p = resp.data;
     const ownerName = p.ownerUsername || p.owner || "";
@@ -1201,19 +1209,61 @@ source.getPlaylist = function(url) {
           )
         : new PlatformAuthorLink(new PlatformID(PLATFORM, "", config.id), "", "", "");
 
-    const details = (p.videoDetails || []).map(toPlatformVideo);
+    const firstPage = (p.videoDetails || []).map(toPlatformVideo);
+    const pag = resp.pagination || {};
+    // True total comes from pagination.total (server-confirmed), falling back
+    // to the `videos` id array length (full list of ids) or first page length.
+    const totalCount = (typeof pag.total === "number") ? pag.total
+                     : (Array.isArray(p.videos) ? p.videos.length : firstPage.length);
+    let hasMore;
+    if (typeof pag.hasMore === "boolean") hasMore = pag.hasMore;
+    else if (typeof pag.totalPages === "number") hasMore = (pag.page || 1) < pag.totalPages;
+    else hasMore = firstPage.length >= PLAYLIST_PAGE_LIMIT;
+
+    const contents = hasMore
+        ? new PlaylistVideosPager(id, firstPage, PLAYLIST_PAGE_LIMIT, (pag.page || 1), pag.totalPages || 0)
+        : new VideoPager(firstPage, false);
 
     return new PlatformPlaylistDetails({
         id: new PlatformID(PLATFORM, id, config.id),
         name: p.name || "Playlist",
-        thumbnail: p.thumbnail || (details.length ? "" : ""),
+        thumbnail: p.thumbnail || "",
         author: author,
         datetime: parseDateSeconds(p.createdAt),
         url: url,
-        videoCount: details.length,
-        contents: new VideoPager(details, false)
+        videoCount: totalCount,
+        contents: contents
     });
 };
+
+// Paginates a real (non-virtual) playlist's videoDetails across pages.
+// PMVHaven's playlist endpoint accepts ?page=N&limit=50 and returns
+// `videoDetails` for that page only along with a `pagination` block.
+class PlaylistVideosPager extends VideoPager {
+    constructor(playlistId, firstPageResults, limit, currentPage, totalPages) {
+        super(firstPageResults || [], true, { playlistId: playlistId });
+        this.playlistId = playlistId;
+        this.limit = limit || 50;
+        this.page = currentPage || 1;
+        this.totalPages = totalPages || 0;
+    }
+    nextPage() {
+        this.page++;
+        const resp = jsonGETNoThrow(BASE_URL + "/api/playlists/" + this.playlistId + buildQuery({
+            page: this.page,
+            limit: this.limit
+        }));
+        if (!resp || !resp.data) { this.results = []; this.hasMore = false; return this; }
+        const items = (resp.data.videoDetails || []).map(toPlatformVideo);
+        this.results = items;
+        const pag = resp.pagination || {};
+        if (typeof pag.hasMore === "boolean") this.hasMore = pag.hasMore;
+        else if (typeof pag.totalPages === "number") this.hasMore = this.page < pag.totalPages;
+        else this.hasMore = items.length >= this.limit;
+        return this;
+    }
+}
+
 
 // ---------- subscription/playlist migration ----------
 
