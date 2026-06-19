@@ -936,6 +936,27 @@ source.isContentDetailsUrl = function(url) {
     return /^https?:\/\/(?:www\.)?pmvhaven\.com\/video\//.test(url);
 };
 
+// Builds the short looping preview clip (shown on hover/scrub) from PMVHaven's
+// previewUrl. Returns null when the video has no preview so Grayjay omits it.
+function buildPreviewDescriptor(v) {
+    if (!v || !v.previewUrl) return null;
+    try {
+        return new VideoSourceDescriptor([
+            new VideoUrlSource({
+                container: "video/mp4",
+                name: "Preview",
+                width: v.width || 0,
+                height: v.height || 0,
+                url: v.previewUrl,
+                duration: 0
+            })
+        ]);
+    } catch (e) {
+        log("buildPreviewDescriptor error: " + e);
+        return null;
+    }
+}
+
 source.getContentDetails = function(url) {
     const id = extractVideoIdFromUrl(url);
     if (!id) throw new ScriptException("Could not extract video id from " + url);
@@ -975,6 +996,7 @@ source.getContentDetails = function(url) {
         isLive: false,
         description: v.description || "",
         video: new VideoSourceDescriptor(sources),
+        preview: buildPreviewDescriptor(v),
         rating: new RatingLikesDislikes(v.likes || 0, v.dislikes || 0)
     });
     if (typeof v.watchProgress === "number" && v.watchProgress > 0) {
