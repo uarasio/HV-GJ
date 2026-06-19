@@ -139,6 +139,18 @@ function isObjectId(s) {
     return typeof s === "string" && /^[a-f0-9]{24}$/i.test(s);
 }
 
+// True only when running inside Grayjay Desktop. Desktop's channel UI renders
+// just a Videos tab, so we use this to decide whether to fold a profile's
+// playlists into the video feed (Android shows them in its own tab instead).
+function isDesktopClient() {
+    try {
+        if (typeof bridge === "undefined" || !bridge) return false;
+        let bp = bridge.buildPlatform;
+        if (typeof bp === "function") bp = bp.call(bridge);
+        return typeof bp === "string" && bp.toLowerCase().indexOf("desktop") >= 0;
+    } catch (e) { return false; }
+}
+
 // Resolve a profile token (which may be a username OR a 24-char user id, since
 // pmvhaven.com profile URLs use the user's _id) into the full user document.
 function fetchUserByToken(token) {
@@ -886,23 +898,15 @@ source.getChannel = function(url) {
 
 source.getChannelCapabilities = function() {
     return {
-        // Declaring Playlists here is what makes the desktop client render a
-        // "Playlists" section on the channel page (it dispatches to
-        // getChannelContents with type=Playlists). Android detects the
-        // getChannelPlaylists hook by presence instead.
-        types: [Type.Feed.Videos, Type.Feed.Playlists],
+        types: [Type.Feed.Videos],
         sorts: [Type.Order.Chronological],
         filters: []
     };
 };
 
-source.getChannelContents = function(url, type, order, filters) {
+source.getChannelContents = function(url) {
     const token = extractUsernameFromProfileUrl(url);
     if (!token) return new ContentPager([], false);
-    // Desktop asks for a channel's playlists through this same entry point.
-    if (type === Type.Feed.Playlists) {
-        return new ChannelPlaylistsPager(token);
-    }
     // Channel video listing keys off the username; resolve id-based profile
     // URLs (pmvhaven uses the user _id in profile links) to the username first.
     let username = token;
@@ -1449,11 +1453,49 @@ class ChannelVideosPager extends ContentPager {
         const data = jsonGETNoThrow(url);
         if (!data) { this.hasMore = false; this.results = []; return this; }
         const list = data.videos || data.data || [];
-        this.results = list.map(toPlatformVideo);
+        const items = list.map(toPlatformVideo);
+        // Desktop's channel page only renders a Videos tab (it ignores the
+        // getChannelPlaylists capability), so on desktop we surface the
+        // channel's public playlists as cards at the top of the first page.
+        // On Android we skip this — it shows them in a dedicated Playlists tab,
+        // and injecting here would duplicate them.
+        if (this.page === 1 && isDesktopClient()) {
+            const playlists = fetchChannelPlaylists(this.username);
+            this.results = playlists.concat(items);
+        } else {
+            this.results = items;
+        }
         const pagination = data.pagination || {};
-        this.hasMore = pagination.hasNext === true || this.results.length >= 50;
+        this.hasMore = pagination.hasNext === true || items.length >= 50;
         return this;
     }
+}
+
+// Fetch a profile owner's public playlists as PlatformPlaylist cards. `owner`
+// may be a username or user id (pmvhaven's /api/playlists?owner= accepts both).
+function fetchChannelPlaylists(owner) {
+    const out = [];
+    const seen = {};
+    let page = 1;
+    while (page <= 5) { // cap: up to 150 playlists
+        const data = jsonGETNoThrow(BASE_URL + "/api/playlists" + buildQuery({
+            owner: owner, page: page, limit: 30, sort: "-createdAt"
+        }));
+        const list = (data && data.data) || [];
+        if (!Array.isArray(list) || list.length === 0) break;
+        for (let i = 0; i < list.length; i++) {
+            const p = list[i];
+            if (!p || !p._id || seen[p._id]) continue;
+            if (p.isPublic === false) continue;
+            seen[p._id] = true;
+            out.push(toPlatformPlaylist(p));
+        }
+        const meta = (data && data.meta) || {};
+        if (typeof meta.hasMore === "boolean" && !meta.hasMore) break;
+        if (list.length < 30) break;
+        page++;
+    }
+    return out;
 }
 
 class PlaylistsApiPager extends PlaylistPager {
