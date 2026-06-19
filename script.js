@@ -19,7 +19,8 @@ var pluginSettings = {
 var state = {
     isAuthenticated: false,
     username: "",
-    userId: ""
+    userId: "",
+    authCookies: ""
 };
 
 // ---------- helpers ----------
@@ -262,6 +263,91 @@ source.getCapabilities = function() {
 
 // ---------- auth ----------
 
+// All possible better-auth session cookie names PMVHaven may set. Production
+// (HTTPS) uses the "__Secure-" prefixed variants; large tokens get chunked
+// into ".0", ".1", ... We treat any of these as a valid session marker.
+const AUTH_COOKIE_NAMES = [
+    "__Secure-better-auth.session_token",
+    "better-auth.session_token"
+];
+
+function hasValidAuthCookie(cookies) {
+    if (!cookies) return false;
+    // string form: "name=value; name2=value2"
+    if (typeof cookies === "string") {
+        if (cookies.length === 0) return false;
+        for (let i = 0; i < AUTH_COOKIE_NAMES.length; i++) {
+            const n = AUTH_COOKIE_NAMES[i];
+            if (cookies.indexOf(n + "=") >= 0 || cookies.indexOf(n + ".0=") >= 0) return true;
+        }
+        return false;
+    }
+    // array of {name,value}
+    if (Array.isArray(cookies)) {
+        for (let i = 0; i < cookies.length; i++) {
+            const c = cookies[i];
+            if (c && c.name && c.value) {
+                for (let j = 0; j < AUTH_COOKIE_NAMES.length; j++) {
+                    const n = AUTH_COOKIE_NAMES[j];
+                    if (c.name === n || c.name.indexOf(n + ".") === 0) return true;
+                }
+            }
+        }
+        return false;
+    }
+    // object map
+    if (typeof cookies === "object") {
+        for (const k in cookies) {
+            if (!cookies[k]) continue;
+            for (let j = 0; j < AUTH_COOKIE_NAMES.length; j++) {
+                const n = AUTH_COOKIE_NAMES[j];
+                if (k === n || k.indexOf(n + ".") === 0) return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+function cookiesToString(cookies) {
+    if (!cookies) return "";
+    if (typeof cookies === "string") return cookies;
+    if (Array.isArray(cookies)) {
+        return cookies.filter(c => c && c.name && c.value)
+            .map(c => c.name + "=" + c.value).join("; ");
+    }
+    if (typeof cookies === "object") {
+        const out = [];
+        for (const k in cookies) { if (cookies[k]) out.push(k + "=" + cookies[k]); }
+        return out.join("; ");
+    }
+    return "";
+}
+
+// Read whatever cookies Grayjay captured for pmvhaven.com after the login web
+// view. Mirrors SB-GJ: try http.getCookies first, then the bridge variants.
+function loadAuthCookies() {
+    try {
+        if (typeof http.getCookies === "function") {
+            const cookies = http.getCookies(BASE_URL);
+            if (hasValidAuthCookie(cookies)) { state.authCookies = cookiesToString(cookies); return true; }
+        }
+        if (typeof bridge !== "undefined" && bridge) {
+            if (typeof bridge.getCookieString === "function") {
+                const s = bridge.getCookieString(BASE_URL);
+                if (hasValidAuthCookie(s)) { state.authCookies = s; return true; }
+            }
+            if (typeof bridge.getCookies === "function") {
+                try {
+                    const c = bridge.getCookies("pmvhaven.com");
+                    if (hasValidAuthCookie(c)) { state.authCookies = cookiesToString(c); return true; }
+                } catch (e) { /* ignore */ }
+            }
+        }
+    } catch (e) { log("loadAuthCookies error: " + e); }
+    return false;
+}
+
 function fetchUserInfo() {
     // Pull username/userId from /api/auth/get-session using current cookies.
     try {
@@ -282,6 +368,12 @@ function fetchUserInfo() {
     return false;
 }
 
+// Authoritative server-side check: ask /api/auth/get-session with the captured
+// cookies. Returns true and populates username/userId when a session exists.
+function validateSession() {
+    return fetchUserInfo();
+}
+
 function bridgeIsLoggedIn() {
     try {
         if (typeof bridge !== "undefined" && bridge && typeof bridge.isLoggedIn === "function") {
@@ -297,12 +389,16 @@ source.isLoggedIn = function() {
         //    required cookies via its login web view, this is the authoritative
         //    indicator that the user finished the flow.
         if (bridgeIsLoggedIn()) {
+            loadAuthCookies();
             state.isAuthenticated = true;
             if (!state.username) fetchUserInfo();
             return true;
         }
-        // 2) Fallback: ask the server with our stored cookies.
-        if (fetchUserInfo()) {
+        // 2) Make sure we have whatever auth cookies were captured, then ask
+        //    the server with them. This is how the session is recognised after
+        //    the user finishes logging in inside the web view.
+        loadAuthCookies();
+        if (validateSession()) {
             state.isAuthenticated = true;
             return true;
         }
@@ -329,6 +425,7 @@ source.getLoggedInUser = function() {
 // the user can re-validate later from settings without aborting the flow.
 source.login = function() {
     try {
+        loadAuthCookies();
         state.isAuthenticated = true;
         // Best-effort: try to populate the username right away.
         try { fetchUserInfo(); } catch (e) { /* ignore */ }
@@ -346,6 +443,7 @@ source.logout = function() {
     state.isAuthenticated = false;
     state.username = "";
     state.userId = "";
+    state.authCookies = "";
     try {
         if (typeof http.clearCookies === "function") http.clearCookies("pmvhaven.com");
         if (typeof bridge !== "undefined" && bridge && bridge.clearCookies) bridge.clearCookies("pmvhaven.com");
@@ -426,7 +524,10 @@ const CATEGORY_FILTERS = [
 
 source.getSearchCapabilities = function() {
     return {
-        types: [Type.Feed.Mixed, Type.Feed.Videos, Type.Feed.Channels, Type.Feed.Playlists],
+        // Only video feed types here. Including Channels/Playlists in the
+        // search types makes Grayjay hide the filter/sort UI (official plugins
+        // like PeerTube/Rumble only declare video types alongside filters).
+        types: [Type.Feed.Mixed, Type.Feed.Videos],
         sorts: SORT_OPTIONS,
         filters: [
             {
@@ -455,7 +556,7 @@ source.getSearchCapabilities = function() {
             {
                 id: "category",
                 name: "Category",
-                isMultiSelect: true,
+                isMultiSelect: false,
                 filters: CATEGORY_FILTERS
             }
         ]
