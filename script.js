@@ -257,11 +257,10 @@ source.saveState = function() {
 };
 
 source.getCapabilities = function() {
-    // Mirrors SB-GJ exactly: a single capability key so Grayjay surfaces its
-    // built-in "Sync" section ("Synchronization of platform data — Sync Remote
-    // History from this platform on startup"). `pluginSettings.syncRemoteHistory`
-    // defaults to `true`, so this always reports `true` unless the user
-    // explicitly disables it in the Sync tab.
+    // Kept for completeness, but note: Grayjay does NOT read this to decide
+    // whether to show the Sync tab. It detects history support purely by the
+    // presence of `source.getUserHistory` (JSClient.kt: `!!source.getUserHistory`).
+    // The actual gate is therefore `source.getUserHistory` being defined below.
     return {
         hasSyncRemoteWatchHistory: pluginSettings.syncRemoteHistory
     };
@@ -1134,6 +1133,16 @@ source.getUserPlaylists = function() {
 };
 
 // ---------- remote watch history ----------
+
+// Grayjay (Android & Desktop) detects "Sync Remote History" support ONLY by the
+// presence of `source.getUserHistory` (JSClient.kt -> `!!source.getUserHistory`).
+// When the user enables the built-in "Sync > Sync Remote History" toggle, Grayjay
+// calls `source.getUserHistory()` on startup (StateHistory.syncRemoteHistory).
+// `source.syncRemoteWatchHistory` and `source.getCapabilities` are NOT used for
+// this, so defining getUserHistory is what makes the Sync tab appear AND import.
+source.getUserHistory = function() {
+    return source.syncRemoteWatchHistory(null);
+};
 
 source.syncRemoteWatchHistory = function(continuationToken) {
     // IMPORTANT: Grayjay's startup sync only consumes the first page returned
