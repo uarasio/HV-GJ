@@ -8,7 +8,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/HV-GJ/refs/heads/main/config.json",
   "repositoryUrl": "https://github.com/uarasio/HV-GJ",
   "scriptUrl": "./script.js",
-  "version": 22,
+  "version": 23,
 
   "iconUrl": "./logo.png",
   "id": "03fb92a4-f857-4f45-a7bf-00c1660e75cb",
@@ -30,11 +30,11 @@
   "authentication": {
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "loginUrl": "https://pmvhaven.com/login",
-    "completionUrl": "https://pmvhaven.com/",
+    "completionUrl": "",
     "domainHeadersToFind": {
       "pmvhaven.com": ["Cookie"]
     },
-    "cookiesToFind": ["better-auth.session_token"],
+    "cookiesToFind": ["__Secure-better-auth.session_token"],
     "cookiesExclOthers": false
   },
 

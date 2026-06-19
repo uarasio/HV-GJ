@@ -292,12 +292,12 @@ test("getUserPlaylists returns [] when not logged in", () => {
     return "[]";
 });
 
-test("getSearchCapabilities exposes sort + Date/Duration/Quality filters", () => {
+test("getSearchCapabilities exposes sort + Date/Duration/Category filters", () => {
     const caps = source.getSearchCapabilities();
     if (!caps.sorts || caps.sorts.indexOf("Newest") < 0) throw new Error("missing Newest sort");
     if (!caps.sorts || caps.sorts.indexOf("Most Liked") < 0) throw new Error("missing Most Liked sort");
     const ids = (caps.filters || []).map(f => f.id);
-    ["date", "duration", "quality"].forEach(n => {
+    ["date", "duration", "category"].forEach(n => {
         if (ids.indexOf(n) < 0) throw new Error("missing filter id: " + n);
     });
     return `sorts=${caps.sorts.length}, filter ids=${ids.join(",")}`;
@@ -329,8 +329,8 @@ test("search filters use array values (Grayjay format) — Duration=[20+]", () =
     return `${pager.results.length} videos, all ≥ 20min`;
 });
 
-test("search filters Quality=[FHD] returns 1080p+ videos", () => {
-    const pager = source.search("hypno", "MIXED", null, { quality: ["FHD"] });
+test("search filters Category=[anal] returns tagged videos", () => {
+    const pager = source.search("hypno", "MIXED", null, { category: ["anal"] });
     if (!pager.results || pager.results.length === 0) throw new Error("no results");
     return `${pager.results.length} videos`;
 });
@@ -346,7 +346,7 @@ test("getSearchCapabilities exposes Grayjay-shaped filters (id + isMultiSelect)"
     const f = caps.filters;
     if (!Array.isArray(f) || f.length !== 3) throw new Error("expected 3 filter groups");
     const ids = f.map(x => x.id).sort();
-    if (ids.join(",") !== "date,duration,quality") throw new Error("bad filter ids: " + ids);
+    if (ids.join(",") !== "category,date,duration") throw new Error("bad filter ids: " + ids);
     f.forEach(g => {
         if (typeof g.isMultiSelect === "undefined") throw new Error("missing isMultiSelect on " + g.id);
         if (!Array.isArray(g.filters)) throw new Error("missing filters array on " + g.id);
@@ -396,6 +396,41 @@ test("comment pager hasMore reflects API pagination", () => {
     if (pager.hasMore !== false) throw new Error("hasMore should be false on small set");
     return "hasMore=false (correct)";
 });
+
+test("home feed paginates without repeating (page param fix)", () => {
+    const pager = source.getHome();
+    const first = pager.results.map(v => v.url);
+    if (first.length === 0) throw new Error("no videos on page 1");
+    pager.nextPage();
+    const second = pager.results.map(v => v.url);
+    if (second.length === 0) throw new Error("no videos on page 2");
+    const overlap = second.filter(u => first.indexOf(u) >= 0).length;
+    if (overlap > 0) throw new Error(overlap + " repeated videos across pages");
+    return `p1=${first.length}, p2=${second.length}, overlap=0`;
+});
+
+test("video search paginates without repeating", () => {
+    const pager = source.search("hypno", "MIXED", null, null);
+    const first = pager.results.map(v => v.url);
+    pager.nextPage();
+    const second = pager.results.map(v => v.url);
+    if (first.length === 0 || second.length === 0) throw new Error("missing page results");
+    const overlap = second.filter(u => first.indexOf(u) >= 0).length;
+    if (overlap > 0) throw new Error(overlap + " repeated videos across pages");
+    return `p1=${first.length}, p2=${second.length}, overlap=0`;
+});
+
+test("playlist search paginates without repeating", () => {
+    const pager = source.searchPlaylists("test");
+    const first = pager.results.map(p => p.url);
+    if (first.length === 0) throw new Error("no playlists on page 1");
+    pager.nextPage();
+    const second = pager.results.map(p => p.url);
+    const overlap = second.filter(u => first.indexOf(u) >= 0).length;
+    if (overlap > 0) throw new Error(overlap + " repeated playlists across pages");
+    return `p1=${first.length}, p2=${second.length}, overlap=0`;
+});
+
 
 console.log("\n=== Summary ===");
 const failed = results.filter(r => !r.ok);

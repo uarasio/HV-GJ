@@ -355,7 +355,10 @@ source.logout = function() {
 // ---------- home ----------
 
 source.getHome = function() {
-    return new VideosApiPager("trending", { period: "24h" });
+    // The /api/videos/trending endpoint is NOT paginated: it returns the same
+    // fixed set on every page, which made Grayjay's home feed repeat forever.
+    // Use the browse endpoint (/api/videos) which paginates correctly.
+    return new VideosApiPager("browse", { sort: "-uploadDate" });
 };
 
 // ---------- search ----------
@@ -363,13 +366,14 @@ source.getHome = function() {
 source.searchSuggestions = function(query) { return []; };
 
 // Search filter constants (must match values used in search())
-const SORT_OPTIONS = ["Relevance", "Newest", "Oldest", "Most Popular", "Most Liked"];
+const SORT_OPTIONS = ["Relevance", "Newest", "Oldest", "Most Viewed", "Most Liked", "Top Rated"];
 const SORT_MAP = {
-    "Relevance":     "",
-    "Newest":        "-uploadDate",
-    "Oldest":        "uploadDate",
-    "Most Popular":  "-bayesianRating",
-    "Most Liked":    "-likes"
+    "Relevance":    "",
+    "Newest":       "-uploadDate",
+    "Oldest":       "uploadDate",
+    "Most Viewed":  "-views",
+    "Most Liked":   "-likes",
+    "Top Rated":    "-bayesianRating"
 };
 const DATE_DAYS = { "today": 1, "7days": 7, "30days": 30, "365days": 365 };
 const DURATION_MAP = {
@@ -377,13 +381,48 @@ const DURATION_MAP = {
     "5-20":  { durationMin: 5 * 60, durationMax: 20 * 60 },
     "20+":   { durationMin: 20 * 60 }
 };
-const QUALITY_MAP = {
-    "4K":  { minHeight: 2160 },
-    "QHD": { minHeight: 1440, maxHeight: 2159 },
-    "FHD": { minHeight: 1080, maxHeight: 1439 },
-    "HD":  { minHeight: 720,  maxHeight: 1079 },
-    "SD":  { maxHeight: 719 }
-};
+// Popular PMVHaven tags used to build the "Category" filter (multi-select).
+const CATEGORY_FILTERS = [
+    { name: "Any",            value: "" },
+    { name: "Amateur",        value: "amateur" },
+    { name: "Anal",           value: "anal" },
+    { name: "Asian",          value: "asian" },
+    { name: "Big Ass",        value: "big ass" },
+    { name: "Big Tits",       value: "big tits" },
+    { name: "Blonde",         value: "blonde" },
+    { name: "Blowjob",        value: "blowjob" },
+    { name: "Brunette",       value: "brunette" },
+    { name: "Cosplay",        value: "cosplay" },
+    { name: "Cowgirl",        value: "cowgirl" },
+    { name: "Creampie",       value: "creampie" },
+    { name: "Cum",            value: "cum" },
+    { name: "Cumshot",        value: "cumshot" },
+    { name: "Cute",           value: "cute" },
+    { name: "Dancing",        value: "dancing" },
+    { name: "Deepthroat",     value: "deepthroat" },
+    { name: "Doggystyle",     value: "doggystyle" },
+    { name: "Facial",         value: "facial" },
+    { name: "Gangbang",       value: "gangbang" },
+    { name: "Goon",           value: "goon" },
+    { name: "Hardcore",       value: "hardcore" },
+    { name: "Hentai",         value: "hentai" },
+    { name: "HMV",            value: "hmv" },
+    { name: "Hypno",          value: "hypno" },
+    { name: "Interracial",    value: "interracial" },
+    { name: "Japanese",       value: "japanese" },
+    { name: "JAV",            value: "jav" },
+    { name: "MILF",           value: "milf" },
+    { name: "POV",            value: "pov" },
+    { name: "PAWG",           value: "pawg" },
+    { name: "Riding",         value: "riding" },
+    { name: "Sissy",          value: "sissy" },
+    { name: "Splitscreen",    value: "splitscreen" },
+    { name: "Teasing",        value: "teasing" },
+    { name: "Teen",           value: "teen" },
+    { name: "TikTok",         value: "tiktok" },
+    { name: "Twerking",       value: "twerking" },
+    { name: "3D",             value: "3d" }
+];
 
 source.getSearchCapabilities = function() {
     return {
@@ -414,17 +453,10 @@ source.getSearchCapabilities = function() {
                 ]
             },
             {
-                id: "quality",
-                name: "Quality",
-                isMultiSelect: false,
-                filters: [
-                    { name: "Any", value: "" },
-                    { name: "4K",  value: "4K" },
-                    { name: "QHD", value: "QHD" },
-                    { name: "FHD", value: "FHD" },
-                    { name: "HD",  value: "HD" },
-                    { name: "SD",  value: "SD" }
-                ]
+                id: "category",
+                name: "Category",
+                isMultiSelect: true,
+                filters: CATEGORY_FILTERS
             }
         ]
     };
@@ -443,8 +475,8 @@ function buildSearchFilterParams(order, filters) {
         }
         const dur = pickFilter(filters, "duration");
         if (dur && DURATION_MAP[dur]) Object.assign(out, DURATION_MAP[dur]);
-        const q = pickFilter(filters, "quality");
-        if (q && QUALITY_MAP[q]) Object.assign(out, QUALITY_MAP[q]);
+        const tags = pickFilterAll(filters, "category").filter(t => t && t.length > 0);
+        if (tags.length) out.tags = tags.join(",");
     }
     return out;
 }
@@ -454,6 +486,13 @@ function pickFilter(filters, id) {
     const v = filters[id];
     if (Array.isArray(v)) return v.length ? v[0] : null;
     return v || null;
+}
+
+function pickFilterAll(filters, id) {
+    if (!filters) return [];
+    const v = filters[id];
+    if (Array.isArray(v)) return v.slice();
+    return v ? [v] : [];
 }
 
 source.search = function(query, type, order, filters) {
@@ -824,22 +863,37 @@ source.syncRemoteWatchHistory = function(continuationToken) {
 class VideosApiPager extends ContentPager {
     constructor(kind, payload) {
         super([], true);
-        this.kind = kind; // "trending" or "search"
+        this.kind = kind; // "browse", "search" or "trending"
         this.payload = payload || {};
         this.page = 0;
+        this.seen = {};
         this.nextPage();
     }
     nextPage() {
         this.page++;
-        const url = BASE_URL + "/api/videos/" + this.kind + buildQuery(
-            Object.assign({}, this.payload, { index: this.page, limit: 50 })
+        // PMVHaven's API paginates with `page` (the previous `index` param was
+        // silently ignored, which is why feeds repeated the same results). The
+        // browse feed lives at /api/videos, search/trending have sub-paths.
+        const path = (this.kind === "browse") ? "/api/videos" : ("/api/videos/" + this.kind);
+        const url = BASE_URL + path + buildQuery(
+            Object.assign({}, this.payload, { page: this.page, limit: 50 })
         );
         const data = jsonGETNoThrow(url);
-        if (!data) { this.hasMore = false; this.results = []; return this; }
-        if (data.success === false) { this.hasMore = false; this.results = []; return this; }
+        if (!data || data.success === false) { this.hasMore = false; this.results = []; return this; }
         const list = data.videos || data.data || [];
-        this.results = list.map(toPlatformVideo);
-        this.hasMore = this.results.length >= 50;
+        // De-duplicate across pages so already-seen videos never reappear.
+        const fresh = [];
+        for (let i = 0; i < list.length; i++) {
+            const v = list[i];
+            const id = v && (v._id || v.id);
+            if (!id || this.seen[id]) continue;
+            this.seen[id] = true;
+            fresh.push(toPlatformVideo(v));
+        }
+        this.results = fresh;
+        const pag = data.pagination || {};
+        if (typeof pag.hasNext === "boolean") this.hasMore = pag.hasNext;
+        else this.hasMore = list.length >= 50;
         return this;
     }
 }
@@ -873,16 +927,23 @@ class PlaylistsApiPager extends PlaylistPager {
         super([], true);
         this.query = query;
         this.page = 0;
+        this.seen = {};
         this.nextPage();
     }
     nextPage() {
         this.page++;
+        // Use `page` (not the ignored `index`) so playlist search actually
+        // advances instead of returning page 1 over and over.
         const url = BASE_URL + "/api/playlists/search" + buildQuery({
-            q: this.query, index: this.page, limit: 20
+            q: this.query, page: this.page, limit: 20
         });
         const data = jsonGETNoThrow(url);
         const list = (data && data.data) || [];
-        this.results = list.map(p => {
+        const out = [];
+        for (let i = 0; i < list.length; i++) {
+            const p = list[i];
+            if (!p || !p._id || this.seen[p._id]) continue;
+            this.seen[p._id] = true;
             const ownerName = p.ownerUsername || "";
             const author = ownerName
                 ? new PlatformAuthorLink(
@@ -892,7 +953,7 @@ class PlaylistsApiPager extends PlaylistPager {
                     ""
                   )
                 : new PlatformAuthorLink(new PlatformID(PLATFORM, "", config.id), "", "", "");
-            return new PlatformPlaylist({
+            out.push(new PlatformPlaylist({
                 id: new PlatformID(PLATFORM, p._id, config.id),
                 name: p.name || "Playlist",
                 thumbnail: p.thumbnailUrl || "",
@@ -900,9 +961,12 @@ class PlaylistsApiPager extends PlaylistPager {
                 datetime: parseDateSeconds(p.createdAt),
                 url: playlistUrlFromId(p._id),
                 videoCount: p.videoCount || 0
-            });
-        });
-        this.hasMore = this.results.length >= 20;
+            }));
+        }
+        this.results = out;
+        const meta = (data && data.meta) || {};
+        if (typeof meta.hasMore === "boolean") this.hasMore = meta.hasMore;
+        else this.hasMore = list.length >= 20;
         return this;
     }
 }
