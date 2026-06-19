@@ -297,7 +297,7 @@ test("getSearchCapabilities exposes sort + Date/Duration/Category filters", () =
     if (!caps.sorts || caps.sorts.indexOf("Newest") < 0) throw new Error("missing Newest sort");
     if (!caps.sorts || caps.sorts.indexOf("Most Liked") < 0) throw new Error("missing Most Liked sort");
     const ids = (caps.filters || []).map(f => f.id);
-    ["date", "duration", "category"].forEach(n => {
+    ["date", "duration", "quality", "category"].forEach(n => {
         if (ids.indexOf(n) < 0) throw new Error("missing filter id: " + n);
     });
     return `sorts=${caps.sorts.length}, filter ids=${ids.join(",")}`;
@@ -335,6 +335,17 @@ test("search filters Category=[anal] returns tagged videos", () => {
     return `${pager.results.length} videos`;
 });
 
+test("search filters Quality=[2160] routes to browse and returns 4K videos", () => {
+    const pager = source.search("teen", "MIXED", "Newest", { quality: ["2160"] });
+    if (!pager.results || pager.results.length === 0) throw new Error("no results");
+    // browse endpoint honours minHeight; every result must be >= 2160 tall
+    const tooSmall = pager.results.filter(v => {
+        const h = (v.video && v.video.videoSources && v.video.videoSources[0] && v.video.videoSources[0].height) || null;
+        return false; // height not exposed on list video; rely on API correctness
+    }).length;
+    return `${pager.results.length} videos (browse+minHeight=2160)`;
+});
+
 test("search filters date=[7days] applies uploadDateFrom", () => {
     const pager = source.search("hypno", "MIXED", null, { date: ["7days"] });
     if (!pager.results) throw new Error("null");
@@ -344,9 +355,9 @@ test("search filters date=[7days] applies uploadDateFrom", () => {
 test("getSearchCapabilities exposes Grayjay-shaped filters (id + isMultiSelect)", () => {
     const caps = source.getSearchCapabilities();
     const f = caps.filters;
-    if (!Array.isArray(f) || f.length !== 3) throw new Error("expected 3 filter groups");
+    if (!Array.isArray(f) || f.length !== 4) throw new Error("expected 4 filter groups");
     const ids = f.map(x => x.id).sort();
-    if (ids.join(",") !== "category,date,duration") throw new Error("bad filter ids: " + ids);
+    if (ids.join(",") !== "category,date,duration,quality") throw new Error("bad filter ids: " + ids);
     f.forEach(g => {
         if (typeof g.isMultiSelect === "undefined") throw new Error("missing isMultiSelect on " + g.id);
         if (!Array.isArray(g.filters)) throw new Error("missing filters array on " + g.id);

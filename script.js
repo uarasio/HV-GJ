@@ -479,6 +479,14 @@ const DURATION_MAP = {
     "5-20":  { durationMin: 5 * 60, durationMax: 20 * 60 },
     "20+":   { durationMin: 20 * 60 }
 };
+// Quality buckets via video height. These params are honoured ONLY by the
+// browse endpoint (/api/videos), so search() routes to browse when set.
+const QUALITY_MAP = {
+    "2160": { minHeight: 2160 },
+    "1440": { minHeight: 1440, maxHeight: 2159 },
+    "1080": { minHeight: 1080, maxHeight: 1439 },
+    "720":  { minHeight: 720,  maxHeight: 1079 }
+};
 // Popular PMVHaven tags used to build the "Category" filter (multi-select).
 const CATEGORY_FILTERS = [
     { name: "Any",            value: "" },
@@ -554,6 +562,18 @@ source.getSearchCapabilities = function() {
                 ]
             },
             {
+                id: "quality",
+                name: "Quality",
+                isMultiSelect: false,
+                filters: [
+                    { name: "Any",        value: "" },
+                    { name: "2160p (4K)", value: "2160" },
+                    { name: "1440p",      value: "1440" },
+                    { name: "1080p",      value: "1080" },
+                    { name: "720p",       value: "720" }
+                ]
+            },
+            {
                 id: "category",
                 name: "Category",
                 isMultiSelect: false,
@@ -576,6 +596,8 @@ function buildSearchFilterParams(order, filters) {
         }
         const dur = pickFilter(filters, "duration");
         if (dur && DURATION_MAP[dur]) Object.assign(out, DURATION_MAP[dur]);
+        const q = pickFilter(filters, "quality");
+        if (q && QUALITY_MAP[q]) Object.assign(out, QUALITY_MAP[q]);
         const tags = pickFilterAll(filters, "category").filter(t => t && t.length > 0);
         if (tags.length) out.tags = tags.join(",");
     }
@@ -600,6 +622,18 @@ source.search = function(query, type, order, filters) {
     if (type === Type.Feed.Channels) return source.searchChannels(query);
     if (type === Type.Feed.Playlists) return source.searchPlaylists(query);
     const extra = buildSearchFilterParams(order, filters);
+    // The text-search endpoint (/api/videos/search) ignores minHeight/maxHeight,
+    // so when a Quality filter is active we use the browse endpoint
+    // (/api/videos) which honours every filter. Browse has no free-text param,
+    // so the typed query is folded into the tag list (matches pmvhaven.com's
+    // own tag-based /search page).
+    if (extra.minHeight || extra.maxHeight) {
+        const tagList = [];
+        if (extra.tags) tagList.push(extra.tags);
+        if (query && query.trim()) tagList.push(query.trim().toLowerCase());
+        if (tagList.length) extra.tags = tagList.join(",");
+        return new VideosApiPager("browse", extra);
+    }
     return new VideosApiPager("search", Object.assign({ q: query }, extra));
 };
 
